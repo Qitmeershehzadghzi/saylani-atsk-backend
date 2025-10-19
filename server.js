@@ -3,11 +3,9 @@ import cors from "cors";
 import dotenv from "dotenv";
 import conDb from "./config/db.js";
 import userRouter from "./routes/userRoute.js";
-// import { notFound, errorHandler } from "./middleware/errorMiddleware.js";
 
 dotenv.config();
 const app = express();
-const port = process.env.PORT || 4000;
 
 conDb();
 
@@ -22,8 +20,8 @@ app.get("/", (req, res) => {
   res.send("🚀 Backend Server is Running");
 });
 
-// Error Middleware
-// app.use(notFound);
-// app.use(errorHandler);
+// ❌ Ye line hata do
+// app.listen(port, () => console.log(`✅ Server started on port ${port}`));
 
-app.listen(port, () => console.log(`✅ Server started on port ${port}`));
+// ✅ Ye line add karo
+export default app;
