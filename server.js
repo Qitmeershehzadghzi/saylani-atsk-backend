@@ -7,8 +7,10 @@ import userRouter from "./routes/userRoute.js";
 dotenv.config();
 const app = express();
 
+// DB Connect
 conDb();
 
+// Middlewares
 app.use(cors());
 app.use(express.json());
 
@@ -17,11 +19,8 @@ app.use("/api/user", userRouter);
 
 // Root Route
 app.get("/", (req, res) => {
-  res.send("🚀 Backend Server is Running");
+  res.send("🚀 Backend Server is Running ✅");
 });
 
-// ❌ Ye line hata do
-// app.listen(port, () => console.log(`✅ Server started on port ${port}`));
-
-// ✅ Ye line add karo
+// 🟡 Important: Vercel me `app.listen` mat lagao
 export default app;
