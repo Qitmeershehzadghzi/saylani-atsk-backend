@@ -7,7 +7,6 @@ import * as pdf from "pdf-parse";
 import dotenv from "dotenv";
 import { jsPDF } from "jspdf";
 import autoTable from "jspdf-autotable";
-import fs from "fs";
 
 dotenv.config();
 
@@ -32,7 +31,7 @@ const uploadToCloudinary = (file) => {
   });
 };
 
-// 📄 Upload & Analyze Report
+// 📄 Upload & Analyze Report (Vercel Safe)
 export const uploadReport = async (req, res) => {
   try {
     if (!process.env.OPENROUTER_API_KEY)
@@ -45,10 +44,10 @@ export const uploadReport = async (req, res) => {
     if (!file)
       return res.status(400).json({ success: false, msg: "No file uploaded" });
 
-    // ✅ Upload to Cloudinary
+    // ✅ Upload report file to Cloudinary
     const result = await uploadToCloudinary(file);
 
-    // ✅ Extract Text (PDF or Image)
+    // ✅ Extract text from PDF or Image (OCR)
     let reportText = "";
     if (file.mimetype === "application/pdf") {
       const data = await pdf.default(file.buffer);
@@ -60,7 +59,7 @@ export const uploadReport = async (req, res) => {
         "Image uploaded but no readable text detected.";
     }
 
-    // ✅ Send to AI
+    // ✅ AI prompt for OpenRouter
     const prompt = `
 You are a medical assistant. Analyze this health report and provide:
 1. English Summary
@@ -73,15 +72,13 @@ Report Data:
 ${reportText}
 `;
 
+    // ✅ Send text to OpenRouter model
     const response = await axios.post(
       "https://openrouter.ai/api/v1/chat/completions",
       {
         model: "mistralai/mistral-7b-instruct",
         messages: [
-          {
-            role: "system",
-            content: "You are a helpful medical assistant.",
-          },
+          { role: "system", content: "You are a helpful medical assistant." },
           { role: "user", content: prompt },
         ],
       },
@@ -99,7 +96,7 @@ ${reportText}
       response.data?.choices?.[0]?.message?.content ||
       "AI did not return any text.";
 
-    // ✅ Generate PDF locally
+    // ✅ Generate PDF in memory (no local file)
     const pdfDoc = new jsPDF();
     pdfDoc.setFontSize(14);
     pdfDoc.text("HealthMate AI Report Summary", 15, 15);
@@ -112,31 +109,35 @@ ${reportText}
     const wrappedText = pdfDoc.splitTextToSize(aiText, 180);
     pdfDoc.text(wrappedText, 15, 60);
 
-    const filePath = `./report_${Date.now()}.pdf`;
-    pdfDoc.save(filePath);
+    // ✅ Convert PDF to buffer (base64)
+    const pdfBase64 = pdfDoc.output("datauristring").split(",")[1];
+    const pdfBuffer = Buffer.from(pdfBase64, "base64");
 
-    // ✅ Upload PDF to Cloudinary
-    const pdfUpload = await cloudinary.uploader.upload(filePath, {
-      resource_type: "auto",
-      folder: "healthmate/reports",
+    // ✅ Upload PDF buffer directly to Cloudinary
+    const pdfUpload = await new Promise((resolve, reject) => {
+      const uploadStream = cloudinary.uploader.upload_stream(
+        { resource_type: "raw", folder: "healthmate/reports", format: "pdf" },
+        (err, result) => {
+          if (err) return reject(err);
+          resolve(result);
+        }
+      );
+      uploadStream.end(pdfBuffer);
     });
 
-    // ✅ Delete local file
-    fs.unlinkSync(filePath);
-
-    // ✅ Save to MongoDB
+    // ✅ Save report in MongoDB
     const report = await ReportModel.create({
       user: req.user._id,
       fileUrl: result.secure_url,
       fileType: file.mimetype,
       aiSummary: { english: aiText },
-      pdfUrl: pdfUpload.secure_url, // 🔥 new field
+      pdfUrl: pdfUpload.secure_url, // 💾 AI Report PDF download link
     });
 
     res.json({
       success: true,
       report,
-      msg: "Report analyzed and PDF generated successfully.",
+      msg: "Report analyzed and downloadable PDF generated successfully.",
     });
   } catch (error) {
     console.error("AI Analysis Error:", error.response?.data || error.message);
