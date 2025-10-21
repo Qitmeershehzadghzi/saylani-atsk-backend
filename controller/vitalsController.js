@@ -12,6 +12,7 @@ export const addVitals = async (req, res) => {
   }
 };
 
+// Remove extra "};" at the end of file
 export const getVitals = async (req, res) => {
   try {
     const vitals = await VitalsModel.find({ user: req.user._id }).sort({
@@ -21,4 +22,4 @@ export const getVitals = async (req, res) => {
   } catch (error) {
     res.status(500).json({ success: false, msg: error.message });
   }
-};
+}; // ✅ This should be the last line
