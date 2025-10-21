@@ -14,7 +14,7 @@ const reportSchema = new mongoose.Schema(
         bp: String,
         sugar: String,
         weight: String,
-        pulse: String,
+        pulse: String,  
       },
     },
   },

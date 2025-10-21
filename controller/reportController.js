@@ -5,6 +5,10 @@ import ReportModel from "../models/ReportModel.js";
 import VitalsModel from "../models/VitalsModel.js";
 import * as pdf from "pdf-parse";
 import dotenv from "dotenv";
+import { jsPDF } from "jspdf";
+import autoTable from "jspdf-autotable";
+import fs from "fs";
+
 dotenv.config();
 
 // 🌩️ Configure Cloudinary
@@ -31,59 +35,32 @@ const uploadToCloudinary = (file) => {
 // 📄 Upload & Analyze Report
 export const uploadReport = async (req, res) => {
   try {
-    // ✅ Check API Key
-    if (!process.env.OPENROUTER_API_KEY) {
+    if (!process.env.OPENROUTER_API_KEY)
       return res.status(500).json({
         success: false,
         msg: "Missing OpenRouter API key.",
       });
-    }
 
     const file = req.file;
     if (!file)
       return res.status(400).json({ success: false, msg: "No file uploaded" });
 
     // ✅ Upload to Cloudinary
-    let result;
-    try {
-      result = await uploadToCloudinary(file);
-    } catch (err) {
-      console.error("Cloudinary upload error:", err);
-      return res
-        .status(500)
-        .json({ success: false, msg: "Cloudinary upload failed." });
-    }
+    const result = await uploadToCloudinary(file);
 
-    // ✅ Extract text (PDF or Image)
+    // ✅ Extract Text (PDF or Image)
     let reportText = "";
     if (file.mimetype === "application/pdf") {
-      try {
-        const data = await pdf.default(file.buffer);
-        reportText = data.text?.trim() || "PDF text extraction failed.";
-      } catch (pdfError) {
-        console.error("PDF parsing error:", pdfError);
-        reportText = "PDF uploaded but text extraction failed.";
-      }
+      const data = await pdf.default(file.buffer);
+      reportText = data.text?.trim() || "PDF text extraction failed.";
     } else {
-      try {
-        const ocrResult = await Tesseract.recognize(file.buffer, "eng");
-        reportText =
-          ocrResult.data.text?.trim() ||
-          "Image uploaded but no readable text detected.";
-      } catch (ocrError) {
-        console.error("OCR extraction error:", ocrError);
-        reportText = "Image uploaded but OCR extraction failed.";
-      }
+      const ocrResult = await Tesseract.recognize(file.buffer, "eng");
+      reportText =
+        ocrResult.data.text?.trim() ||
+        "Image uploaded but no readable text detected.";
     }
 
-    if (!reportText || reportText.length < 20) {
-      return res.status(400).json({
-        success: false,
-        msg: "Unable to extract text. Please upload a clearer report.",
-      });
-    }
-
-    // ✅ AI Prompt
+    // ✅ Send to AI
     const prompt = `
 You are a medical assistant. Analyze this health report and provide:
 1. English Summary
@@ -96,20 +73,16 @@ Report Data:
 ${reportText}
 `;
 
-    // ✅ Send to OpenRouter API
     const response = await axios.post(
       "https://openrouter.ai/api/v1/chat/completions",
       {
-        model: "mistralai/mistral-7b-instruct", // free stable model
+        model: "mistralai/mistral-7b-instruct",
         messages: [
           {
             role: "system",
             content: "You are a helpful medical assistant.",
           },
-          {
-            role: "user",
-            content: prompt,
-          },
+          { role: "user", content: prompt },
         ],
       },
       {
@@ -126,15 +99,45 @@ ${reportText}
       response.data?.choices?.[0]?.message?.content ||
       "AI did not return any text.";
 
-    // ✅ Save to DB
+    // ✅ Generate PDF locally
+    const pdfDoc = new jsPDF();
+    pdfDoc.setFontSize(14);
+    pdfDoc.text("HealthMate AI Report Summary", 15, 15);
+    pdfDoc.setFontSize(11);
+    pdfDoc.text(`User ID: ${req.user._id}`, 15, 25);
+    pdfDoc.text(`Report Generated: ${new Date().toLocaleString()}`, 15, 35);
+    pdfDoc.setFontSize(12);
+    pdfDoc.text("AI Analysis:", 15, 50);
+
+    const wrappedText = pdfDoc.splitTextToSize(aiText, 180);
+    pdfDoc.text(wrappedText, 15, 60);
+
+    const filePath = `./report_${Date.now()}.pdf`;
+    pdfDoc.save(filePath);
+
+    // ✅ Upload PDF to Cloudinary
+    const pdfUpload = await cloudinary.uploader.upload(filePath, {
+      resource_type: "auto",
+      folder: "healthmate/reports",
+    });
+
+    // ✅ Delete local file
+    fs.unlinkSync(filePath);
+
+    // ✅ Save to MongoDB
     const report = await ReportModel.create({
       user: req.user._id,
       fileUrl: result.secure_url,
       fileType: file.mimetype,
       aiSummary: { english: aiText },
+      pdfUrl: pdfUpload.secure_url, // 🔥 new field
     });
 
-    res.json({ success: true, report });
+    res.json({
+      success: true,
+      report,
+      msg: "Report analyzed and PDF generated successfully.",
+    });
   } catch (error) {
     console.error("AI Analysis Error:", error.response?.data || error.message);
     res.status(500).json({
@@ -144,7 +147,7 @@ ${reportText}
   }
 };
 
-// 📜 Get all reports of user
+// 📜 Get all reports
 export const getUserReports = async (req, res) => {
   try {
     const reports = await ReportModel.find({ user: req.user._id }).sort({
