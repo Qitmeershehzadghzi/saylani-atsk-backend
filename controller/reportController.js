@@ -104,6 +104,7 @@ export const uploadReport = async (req, res) => {
         .status(400)
         .json({ success: false, msg: "Unsupported file type." });
     }
+    //
 
     console.log("📝 Extracted text length:", reportText.length);//
     //
