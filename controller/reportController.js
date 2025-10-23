@@ -105,7 +105,8 @@ export const uploadReport = async (req, res) => {
         .json({ success: false, msg: "Unsupported file type." });
     }
 
-    console.log("📝 Extracted text length:", reportText.length);
+    console.log("📝 Extracted text length:", reportText.length);//
+    //
 
     // ⚙️ Don't block for short text — just warn
     if (reportText.length < 30) {
