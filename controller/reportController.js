@@ -6,7 +6,9 @@ import VitalsModel from "../models/VitalsModel.js";
 import * as pdf from "pdf-parse";
 import dotenv from "dotenv";
 import { jsPDF } from "jspdf";
-import autoTable from "jspdf-autotable";
+import { fromBuffer } from "pdf2pic";
+import fs from "fs-extra";
+// import uploadToCloudinary from "../utils/uploadToCloudinary.js";
 
 dotenv.config();
 
@@ -17,133 +19,212 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-// ☁️ Helper: Upload file to Cloudinary
-const uploadToCloudinary = (file) => {
-  return new Promise((resolve, reject) => {
+// ☁️ Upload helper
+const uploadToCloudinary = (file) =>
+  new Promise((resolve, reject) => {
     const uploadStream = cloudinary.uploader.upload_stream(
       { resource_type: "auto" },
-      (err, result) => {
-        if (err) return reject(err);
-        resolve(result);
-      }
+      (err, result) => (err ? reject(err) : resolve(result))
     );
     uploadStream.end(file.buffer);
   });
-};
 
-// 📄 Upload & Analyze Report (Vercel Safe)
+// 📄 Upload & Analyze Report (Scanned PDF Safe)
 export const uploadReport = async (req, res) => {
   try {
+    console.log("🔍 Starting full PDF/image extraction...");
+
     if (!process.env.OPENROUTER_API_KEY)
-      return res.status(500).json({
-        success: false,
-        msg: "Missing OpenRouter API key.",
-      });
+      return res
+        .status(500)
+        .json({ success: false, msg: "Missing OpenRouter API key." });
 
     const file = req.file;
     if (!file)
-      return res.status(400).json({ success: false, msg: "No file uploaded" });
+      return res
+        .status(400)
+        .json({ success: false, msg: "No file uploaded." });
 
-    // ✅ Upload report file to Cloudinary
-    const result = await uploadToCloudinary(file);
+    console.log("📁 File received:", file.originalname, file.mimetype);
 
-    // ✅ Extract text from PDF or Image (OCR)
+    // ☁️ Upload to Cloudinary
+    const cloudFile = await uploadToCloudinary(file);
+    console.log("☁️ File uploaded successfully to Cloudinary");
+
     let reportText = "";
+
+    // 🧠 Detect file type
     if (file.mimetype === "application/pdf") {
-      const data = await pdf.default(file.buffer);
-      reportText = data.text?.trim() || "PDF text extraction failed.";
+      console.log("📄 Extracting from full PDF...");
+
+      try {
+        // Try normal text extraction
+        const data = await pdf(file.buffer);
+        if (data.text && data.text.trim().length > 50) {
+          reportText = data.text.trim();
+          console.log("✅ Extracted full text-based PDF content");
+        } else {
+          console.log("⚠️ Scanned PDF detected. Performing OCR on all pages...");
+          await fs.ensureDir("./temp");
+
+          const convert = fromBuffer(file.buffer, {
+            density: 250, // increase clarity
+            saveFilename: "page",
+            savePath: "./temp",
+            format: "png",
+            width: 1300,
+            height: 1800,
+          });
+
+          const pages = await convert(-1);
+          let ocrText = "";
+
+          for (const page of pages) {
+            console.log(`🔠 OCR extracting page: ${page.name}`);
+            const ocr = await Tesseract.recognize(page.path, "eng", {
+              logger: (m) => console.log(m.status),
+            });
+            ocrText += "\n" + (ocr.data.text || "");
+            await fs.remove(page.path);
+          }
+
+          reportText = ocrText.trim() || "No readable text found.";
+          console.log("✅ OCR completed successfully.");
+        }
+      } catch (err) {
+        console.error("❌ PDF extraction error:", err.message);
+        reportText = "PDF text extraction failed.";
+      }
+    } else if (file.mimetype.startsWith("image/")) {
+      console.log("🖼️ Extracting text from image...");
+      const ocr = await Tesseract.recognize(file.buffer, "eng");
+      reportText = ocr.data.text?.trim() || "No readable text found.";
     } else {
-      const ocrResult = await Tesseract.recognize(file.buffer, "eng");
-      reportText =
-        ocrResult.data.text?.trim() ||
-        "Image uploaded but no readable text detected.";
+      return res
+        .status(400)
+        .json({ success: false, msg: "Unsupported file type." });
     }
 
-    // ✅ AI prompt for OpenRouter
-    const prompt = `
-You are a medical assistant. Analyze this health report and provide:
-1. English Summary
-2. Roman Urdu Summary
-3. 3 Key Findings
-4. 3 Questions for Doctor
-5. Health Metrics (BP, Sugar, Weight, Pulse)
+    console.log("📝 Extracted text length:", reportText.length);
 
-Report Data:
-${reportText}
+    // ⚙️ Don't block for short text — just warn
+    if (reportText.length < 30) {
+      console.warn("⚠️ Extracted text seems short — continuing anyway...");
+    }
+
+    // 🧩 AI Summary
+    const prompt = `
+You are a bilingual medical assistant who understands both English and Roman Urdu.
+
+Analyze the following medical report and provide:
+
+1. **English Summary:** (2–3 lines)
+2. **Roman Urdu Summary:** (e.g., "Patient ka BP thora high hai")
+3. **3 Key Findings:** (in English)
+4. **3 Questions for Doctor:** (in English)
+5. **Health Metrics:** (BP, Sugar, Weight, Pulse if available)
+
+--- REPORT DATA ---
+${reportText.substring(0, 12000)}
 `;
 
-    // ✅ Send text to OpenRouter model
+    console.log("🤖 Sending text to OpenRouter AI...");
+
     const response = await axios.post(
       "https://openrouter.ai/api/v1/chat/completions",
       {
-        model: "mistralai/mistral-7b-instruct",
+model: "mistralai/mistral-7b-instruct:free",
+
         messages: [
-          { role: "system", content: "You are a helpful medical assistant." },
+          {
+            role: "system",
+            content:
+              "You are a bilingual medical assistant. Always give both English and Roman Urdu summaries clearly separated.",
+          },
           { role: "user", content: prompt },
         ],
+        max_tokens: 1800,
+        temperature: 0.4,
       },
       {
         headers: {
           Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
-          "HTTP-Referer": "http://localhost:3000",
+          "HTTP-Referer": "http://localhost:5000",
           "X-Title": "HealthMate AI Report",
           "Content-Type": "application/json",
         },
+        timeout: 120000,
       }
     );
 
     const aiText =
       response.data?.choices?.[0]?.message?.content ||
       "AI did not return any text.";
+    console.log("✅ AI analysis completed successfully");
 
-    // ✅ Generate PDF in memory (no local file)
+    // 📘 Generate AI PDF
     const pdfDoc = new jsPDF();
-    pdfDoc.setFontSize(14);
+    pdfDoc.setFontSize(16);
     pdfDoc.text("HealthMate AI Report Summary", 15, 15);
-    pdfDoc.setFontSize(11);
-    pdfDoc.text(`User ID: ${req.user._id}`, 15, 25);
-    pdfDoc.text(`Report Generated: ${new Date().toLocaleString()}`, 15, 35);
+    pdfDoc.setFontSize(10);
+    pdfDoc.text(
+      `User ID: ${req.user?._id || "anonymous"}`,
+      15,
+      25
+    );
+    pdfDoc.text(`Generated: ${new Date().toLocaleString()}`, 15, 30);
+    pdfDoc.text(`File: ${file.originalname}`, 15, 35);
     pdfDoc.setFontSize(12);
-    pdfDoc.text("AI Analysis:", 15, 50);
+    pdfDoc.text("AI Analysis:", 15, 45);
 
-    const wrappedText = pdfDoc.splitTextToSize(aiText, 180);
-    pdfDoc.text(wrappedText, 15, 60);
+    const wrapped = pdfDoc.splitTextToSize(aiText, 170);
+    let y = 55;
+    for (const line of wrapped) {
+      if (y > 270) {
+        pdfDoc.addPage();
+        y = 20;
+      }
+      pdfDoc.text(line, 15, y);
+      y += 7;
+    }
 
-    // ✅ Convert PDF to buffer (base64)
-    const pdfBase64 = pdfDoc.output("datauristring").split(",")[1];
-    const pdfBuffer = Buffer.from(pdfBase64, "base64");
+    const pdfBuffer = Buffer.from(pdfDoc.output("arraybuffer"));
 
-    // ✅ Upload PDF buffer directly to Cloudinary
     const pdfUpload = await new Promise((resolve, reject) => {
-      const uploadStream = cloudinary.uploader.upload_stream(
+      const upload = cloudinary.uploader.upload_stream(
         { resource_type: "raw", folder: "healthmate/reports", format: "pdf" },
-        (err, result) => {
-          if (err) return reject(err);
-          resolve(result);
-        }
+        (err, result) => (err ? reject(err) : resolve(result))
       );
-      uploadStream.end(pdfBuffer);
+      upload.end(pdfBuffer);
     });
 
-    // ✅ Save report in MongoDB
+    // 💾 Save report
     const report = await ReportModel.create({
-      user: req.user._id,
-      fileUrl: result.secure_url,
+      user: req.user?._id || "000000000000000000000000",
+      fileUrl: cloudFile.secure_url,
       fileType: file.mimetype,
+      extractedText: reportText,
       aiSummary: { english: aiText },
-      pdfUrl: pdfUpload.secure_url, // 💾 AI Report PDF download link
+      pdfUrl: pdfUpload.secure_url,
     });
+
+    console.log("💾 Report saved successfully");
 
     res.json({
       success: true,
       report,
-      msg: "Report analyzed and downloadable PDF generated successfully.",
+      msg: "Report analyzed successfully — full text extracted from all pages.",
     });
   } catch (error) {
-    console.error("AI Analysis Error:", error.response?.data || error.message);
+    console.error(
+      "❌ AI Analysis Error:",
+      error.response?.data || error.message
+    );
     res.status(500).json({
       success: false,
-      msg: "AI analysis failed. Please check your OpenRouter API key or try again later.",
+      msg:
+        error.response?.data?.error?.message ||
+        "AI analysis failed. Please try again later.",
     });
   }
 };
@@ -151,9 +232,7 @@ ${reportText}
 // 📜 Get all reports
 export const getUserReports = async (req, res) => {
   try {
-    const reports = await ReportModel.find({ user: req.user._id }).sort({
-      createdAt: -1,
-    });
+    const reports = await ReportModel.find({ user: req.user._id }).sort({ createdAt: -1 });
     res.json({ success: true, reports });
   } catch (error) {
     res.status(500).json({ success: false, msg: error.message });
@@ -188,11 +267,10 @@ export const addVitals = async (req, res) => {
 // 🩺 Get Vitals
 export const getVitals = async (req, res) => {
   try {
-    const vitals = await VitalsModel.find({ user: req.user._id }).sort({
-      createdAt: -1,
-    });
+    const vitals = await VitalsModel.find({ user: req.user._id }).sort({ createdAt: -1 });
     res.json({ success: true, vitals });
   } catch (error) {
     res.status(500).json({ success: false, msg: error.message });
   }
 };
+

@@ -8,6 +8,8 @@ import vitalsRouter from './routes/vitalsRoute.js';
 
 // ✅ DOTENV CONFIG - YEH LINE IMPORTANT HAI
 dotenv.config();
+console.log("OPENROUTER_API_KEY:", process.env.OPENROUTER_API_KEY ? "Loaded ✅" : "❌ Missing");
+
 
 // Debug environment variables
 console.log('🔍 Environment Variables Debug:');

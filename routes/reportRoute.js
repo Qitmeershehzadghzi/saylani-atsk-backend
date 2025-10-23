@@ -10,7 +10,7 @@ import {
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() });
 
-router.post("/upload", protect, upload.single("file"), uploadReport);
+router.post("/upload",protect,  upload.single("file"), uploadReport);
 router.get("/", protect, getUserReports);
 router.get("/:id", protect, getReportById);
 
